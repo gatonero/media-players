@@ -1,5 +1,5 @@
 substitutions:
-  name: "raspiaudio-muse-luxe"
+  name: "muse-luxe"
   friendly_name: "RaspiAudio Muse Luxe"
   wifi_ap_password: ""
 
@@ -7,10 +7,16 @@ esphome:
   name: ${name}
   friendly_name: ${friendly_name}
   name_add_mac_suffix: true
-  project:
-    name: raspiaudio.muse-luxe
-    version: "1.0"
   min_version: 2023.5.0
+  on_boot:
+    then:
+      - output.turn_on: dac_mute
+      - light.turn_on:
+          id: top_led
+          effect: slow_pulse
+          red: 100%
+          green: 60%
+          blue: 0%
 
 esp32:
   board: esp-wrover-kit
@@ -19,14 +25,18 @@ esp32:
 
 logger:
 api:
+  services:
+    - service: start_va
+      then:
+        - voice_assistant.start
+    - service: stop_va
+      then:
+        - voice_assistant.stop
 ota:
 
 i2c:
   sda: GPIO18
   scl: GPIO23
-
-dashboard_import:
-  package_import_url: github://esphome/media-players/raspiaudio-muse-luxe.yaml@main
 
 wifi:
   ap:
@@ -43,6 +53,39 @@ external_components:
 
 es8388:
 
+globals:
+  - id: wifi_connected
+    type: bool
+    initial_value: "false"
+    restore_value: false
+
+interval:
+  - interval: 1s
+    then:
+      - if:
+          condition:
+            and:
+              - lambda: 'return !id(wifi_connected);'
+              - wifi.connected:
+          then:
+            - globals.set:
+                id: wifi_connected
+                value: "true"
+            - light.turn_on:
+                id: top_led
+                effect: pulse
+                red: 0%
+                green: 100%
+                blue: 0%
+            - delay: 1s
+            - light.turn_off: top_led
+
+output:
+  - platform: gpio
+    id: dac_mute
+    pin: GPIO21
+    inverted: true
+
 i2s_audio:
   - i2s_lrclk_pin: GPIO25
     i2s_bclk_pin: GPIO5
@@ -57,6 +100,14 @@ media_player:
     mute_pin:
       number: GPIO21
       inverted: true
+    on_state:
+      if:
+        condition:
+          media_player.is_playing:
+        then:
+          output.turn_off: dac_mute
+        else:
+          output.turn_on: dac_mute
 
 microphone:
   - platform: i2s_audio
@@ -68,6 +119,7 @@ microphone:
 voice_assistant:
   microphone: luxe_microphone
   on_start:
+    - media_player.stop:
     - light.turn_on:
         id: top_led
         blue: 100%
@@ -108,22 +160,62 @@ voice_assistant:
 sensor:
   - platform: adc
     pin: GPIO33
-    name: Battery
-    icon: "mdi:battery-outline"
+    name: Battery voltage
     device_class: voltage
+    unit_of_measurement: "V"
+    accuracy_decimals: 2
     state_class: measurement
     entity_category: diagnostic
-    unit_of_measurement: V
     update_interval: 15s
-    accuracy_decimals: 3
-    attenuation: 11db
-    raw: true
+    attenuation: auto
     filters:
-      - multiply: 0.00173913 # 2300 -> 4, for attenuation 11db, based on Olivier's code
+      - multiply: 2 # https://forum.raspiaudio.com/t/esp-muse-luxe-bluetooth-speaker/294/12
       - exponential_moving_average:
           alpha: 0.2
           send_every: 2
       - delta: 0.002
+    on_value:
+      then:
+        - sensor.template.publish:
+            id: battery_percent
+            state: !lambda 'return x;'
+
+  - platform: template
+    name: Battery
+    id: battery_percent
+    device_class: battery
+    unit_of_measurement: "%"
+    accuracy_decimals: 0
+    state_class: measurement
+    entity_category: diagnostic
+    update_interval: 15s
+    filters:
+      - calibrate_polynomial:
+          degree: 3
+          datapoints:
+            - 4.58 -> 100.0
+            - 4.5 -> 97.1
+            - 4.47 -> 94.2
+            - 4.44 -> 88.4
+            - 4.42 -> 82.7
+            - 4.41 -> 76.9
+            - 4.41 -> 71.1
+            - 4.37 -> 65.3
+            - 4.35 -> 59.5
+            - 4.31 -> 53.8
+            - 4.28 -> 48.0
+            - 4.26 -> 42.2
+            - 4.23 -> 36.4
+            - 4.21 -> 30.6
+            - 4.19 -> 24.9
+            - 4.16 -> 19.1
+            - 4.1 -> 13.3
+            - 4.07 -> 10.4
+            - 4.03 -> 7.5
+            - 3.97 -> 4.6
+            - 3.82 -> 1.7
+            - 3.27 -> 0.0
+      - lambda: return std::min(std::max((double)x, 0.0), 100.0);
 
 binary_sensor:
   - platform: gpio
@@ -171,15 +263,21 @@ binary_sensor:
           - voice_assistant.stop:
 
 light:
-  - platform: fastled_clockless
+  - platform: neopixelbus
     name: None
     id: top_led
     pin: GPIO22
-    chipset: SK6812
+    variant: SK6812
     num_leds: 1
-    rgb_order: grb
+    type: grb
+    default_transition_length: 0s
     gamma_correct: 2.8
     effects:
       - pulse:
+          name: pulse
           transition_length: 250ms
           update_interval: 250ms
+      - pulse:
+          name: slow_pulse
+          transition_length: 1s
+          update_interval: 2s
