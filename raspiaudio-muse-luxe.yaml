@@ -114,7 +114,7 @@ microphone:
     id: luxe_microphone
     i2s_din_pin: GPIO35
     adc_type: external
-    pdm: false
+    pdm: true
 
 voice_assistant:
   microphone: luxe_microphone
